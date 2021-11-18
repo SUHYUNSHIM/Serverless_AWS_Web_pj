@@ -1,0 +1,275 @@
+import json
+import boto3
+import os
+import csv
+from contextlib import closing
+from boto3.dynamodb.conditions import Key, Attr
+import urllib.request
+from bs4 import BeautifulSoup
+import re
+
+bucket = 'starsdogbucket' #S3버킷이름
+key = 'dogtime_stars.csv'
+dogsNum = 357
+questionsNum = 26
+
+def lambda_handler(event, context):
+    postId = event["Records"][0]["Sns"]["Message"]
+    #postId = event["postId"]
+    
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table(os.environ['DB_TABLE_NAME'])
+    postItem = table.query(
+        KeyConditionExpression = Key('id').eq(postId)
+        )
+        
+    question = []
+    for i in range(1, questionsNum+1):
+        Q = "Q" + str(i)
+        question.append(int(postItem["Items"][0][Q]))
+        
+    #S3
+    s3_resource = boto3.resource('s3')
+    s3_object = s3_resource.Object(bucket, key)
+    data = s3_object.get()['Body'].read().decode('utf-8').splitlines()
+    
+    #S3 data       
+    lines = csv.reader(data)
+    headers = next(lines)
+    dogs_list = []
+    for line in lines:
+        dogs_list.append(line)
+        
+    distance_list = K_NN(dogs_list, question)
+    cnts = sorted(distance_list)
+    dognamelist = []
+    data_list = []
+    pic_list = []
+    #시각화 별 개수 넣어줄 배열
+    adaptability =[]
+    friendliness =[]
+    health_grooming =[] 
+    trainability =[]
+    physical_needs =[]
+
+    for i in range(5):
+        dognamelist.append(dogs_list[distance_list.index(cnts[i])][0])
+        distance_list[distance_list.index(cnts[i])] = 10000
+        
+        datas = ""
+        datas = Crawling_p(dognamelist[i])
+        result = get_translate_text(datas)
+        data_list.append(result)
+        
+        datass = Crawling_pic(dognamelist[i])
+        pic_list.append(datass)
+        
+        #Crawling_star_vision 리턴값
+        a,b,c,d,e = Crawling_star_vision(dognamelist[i])
+        adaptability.append(a)
+        friendliness.append(b)
+        health_grooming.append(c)
+        trainability.append(d)
+        physical_needs.append(e)
+
+
+    #translate dogname
+    b=""
+    for i in range(5):
+       dognamelist[i] = get_translate_text(dognamelist[i])  #상위 5개의 견종 번역  
+       b = b + dognamelist[i] + "\n" + data_list[i] + "\n" + pic_list[i] + "\n"
+    
+    #save at dynamodb
+    dynamodb2 = boto3.resource('dynamodb')
+    table2 = dynamodb2.Table(os.environ['DB_TABLE_NAME2'])
+    table2.put_item(
+        Item = {
+            "id" : postId,
+            "first_dogname" : dognamelist[0],
+            "first_data" : data_list[0],
+            "first_pic" : pic_list[0],
+            "first_adap" : adaptability[0],
+            "first_friendli" : friendliness[0],
+            "first_health" : health_grooming[0],
+            "first_trainability" : trainability[0],
+            "first_physical" : physical_needs[0],
+            "second_dogname" : dognamelist[1],
+            "second_data" : data_list[1],
+            "second_pic" : pic_list[1],
+            "second_adap" : adaptability[1],
+            "second_friendli" : friendliness[1],
+            "second_health" : health_grooming[1],
+            "second_trainability" : trainability[1],
+            "second_physical" : physical_needs[1],
+            "third_dogname" : dognamelist[2],
+            "third_data" : data_list[2],
+            "third_pic" : pic_list[2],
+            "third_adap" : adaptability[2],
+            "third_friendli" : friendliness[2],
+            "third_health" : health_grooming[2],
+            "third_trainability" : trainability[2],
+            "third_physical" : physical_needs[2],
+            "fourth_dogname" : dognamelist[3],
+            "fourth_data" : data_list[3],
+            "fourth_pic" : pic_list[3],
+            "fourth_adap" : adaptability[3],
+            "fourth_friendli" : friendliness[3],
+            "fourth_health" : health_grooming[3],
+            "fourth_trainability" : trainability[3],
+            "fourth_physical" : physical_needs[3],
+            "fifth_dogname" : dognamelist[4],
+            "fifth_data" : data_list[4],
+            "fifth_pic" : pic_list[4],
+            "fifth_adap" : adaptability[4],
+            "fifth_friendli" : friendliness[4],
+            "fifth_health" : health_grooming[4],
+            "fifth_trainability" : trainability[4],
+            "fifth_physical" : physical_needs[4]
+        })
+    
+    
+    #save at S3 (user_id)
+    s3 = boto3.client("s3")
+    file_obj = s3.get_object(Bucket=bucket, Key='sub/user_id.txt')
+    
+    lambda_path = "/tmp/1.txt"
+    with open(lambda_path, 'w+') as file:
+        file.write(postId)
+        file.close()
+    s3.upload_file(lambda_path, bucket, "sub/user_id.txt")
+    
+    
+# - - - - - - - - - - -  #    
+# 함수 구현 부분
+def K_NN(dogs_list, question):
+    #question = [1, 2, 3, 4, 4, 2, 5, 4, 3, 2, 4, 2, 3, 4, 4, 4, 3, 4, 3, 1, 3, 1,2, 2, 2, 3]
+        
+    distance_list = [0 for _ in range(dogsNum)]
+    
+    count = 0
+    for j in range(dogsNum):
+        for i in range(questionsNum):
+            k = (question[i] - int(dogs_list[j][i+1]))**2
+            distance_list[count] += k
+        count = count+1
+        
+    
+    return distance_list
+    
+def Crawling_p(dogname):
+    
+    if dogname == 'Xoloitzcuintli':
+        dogname = 'Xoloitzuintli'
+    elif dogname == 'Korean-Jindo-Dog':
+        dogname = 'Jindo'
+    
+    url = "https://dogtime.com/dog-breeds/" + dogname
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    response = urllib.request.urlopen(req).read()
+    text = response.decode('utf-8')
+    soup = BeautifulSoup(response, "html.parser")
+    
+    p_tags = soup.find_all("p")
+    data_list = []
+    for i in p_tags:
+        data_list.append(i.text.strip())
+    print (data_list[0])
+        
+    return data_list[0]
+
+
+def Crawling_pic(dogname):
+    
+    if dogname == 'Xoloitzcuintli':
+        dogname = 'Xoloitzuintli'
+    elif dogname == 'Korean-Jindo-Dog':
+        dogname = 'Jindo'
+    
+    url = "https://dogtime.com/dog-breeds/" + dogname
+    req = urllib.request.Request(url, headers = {'User-Agent': 'Mozilla/5.0(Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.3'})
+    response = urllib.request.urlopen(req).read()
+    text = response.decode('utf-8')
+    soup = BeautifulSoup(response, "html.parser")
+
+    soup = soup.find("div", class_="breeds-single-intro")
+    #img의 경로를 받아온다
+    img = soup.find("img")
+    img_src = img.get("src")
+
+    return img_src
+
+
+def get_translate_text(text):
+    
+    REGION = 'us-east-2'
+    SRC_LANG = 'en'
+    TRG_LANG = 'ko'
+    
+    translate = boto3.client(service_name='translate')
+    
+    #사용자 지정 용어 적용 단위
+    p1 = re.compile('[A-C]+')       
+    p2 = re.compile('[D-O]+')
+    p3 = re.compile('[P-Y]+')
+    
+    if p1.match(text[0]) is not None:
+        range = "A-to-C"
+    elif p2.match(text[0]) is not None:
+        range = "D-to-O"
+    elif p3.match(text[0]) is not None:
+        range = "P-to-Y"
+      
+    response = translate.translate_text(
+        Text=text,
+        SourceLanguageCode=SRC_LANG,
+        TargetLanguageCode=TRG_LANG,
+        TerminologyNames=[range],
+    )
+    result = response.get('TranslatedText')
+    
+    return result
+    
+    
+def Crawling_star_vision(dogname) :
+    if dogname == 'Xoloitzcuintli':
+        dogname = 'Xoloitzuintli'
+    elif dogname == 'Korean-Jindo-Dog':
+        dogname = 'Jindo'
+    
+    target_url = 'https://dogtime.com/dog-breeds/' + dogname
+    req = urllib.request.Request('https://dogtime.com/dog-breeds/' + dogname, headers={'User-Agent': 'Mozilla/5.0'})
+    response = urllib.request.urlopen(req).read()
+    text = response.decode('utf-8')
+    soup = BeautifulSoup(response, "html.parser")
+    
+    list = []
+    
+    for star_num in soup.find_all('div', class_="characteristic-star-block"):
+        list.append(star_num.text.strip())
+    
+    sum = 0
+    for i in range(1,7) :
+        sum +=  int(list[i])
+    adap_result = int(sum /6)
+    
+    sum = 0
+    for i in range(8,12) :
+        sum += int(list[i])
+    friend_result = int(sum / 4)
+    
+    sum = 0
+    for i in range(13, 19) :
+        sum += int(list[i])
+    health_result = int(sum / 6)
+    
+    sum = 0
+    for i in range(20, 26) :
+        sum += int(list[i])
+    train_result = int(sum / 6)
+    
+    sum = 0
+    for i in range(27, 31) :
+        sum += int(list[i])
+    physical_result  = int(sum / 4)
+    
+    return adap_result, friend_result, health_result, train_result, physical_result
